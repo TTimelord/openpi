@@ -62,6 +62,16 @@ class AssetsConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class RobomimicSource:
+    path: str
+    key: str
+    demo_limit: int | None = None
+    weight: float = 1.0
+    lang: str | None = None
+    eval: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
@@ -89,6 +99,13 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # Only used for robomimic HDF5 loader.
+    robomimic_sources: Sequence[RobomimicSource] = ()
+    robomimic_low_dim_keys: Sequence[str] = ()
+    robomimic_rgb_keys: Sequence[str] = ()
+    robomimic_action_key: str = "action_abs"
+    robomimic_normalize_weights_by_ds_size: bool = True
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -459,6 +476,43 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class RobomimicHDF5DataConfig(DataConfigFactory):
+    """Config for training directly from robomimic HDF5 files."""
+
+    repo_id: str = "robomimic_hdf5"
+
+    robomimic_sources: Sequence[RobomimicSource] = ()
+    robomimic_low_dim_keys: Sequence[str] = (
+        "robot0_eef_pos",
+        "robot0_eef_quat",
+        "robot0_gripper_qpos",
+    )
+    robomimic_rgb_keys: Sequence[str] = (
+        "agentview_image",
+    )
+    robomimic_action_key: str = "action_abs"
+    robomimic_normalize_weights_by_ds_size: bool = True
+
+    # Factory for the model transforms.
+    model_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=ModelTransformFactory)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if not self.robomimic_sources:
+            raise ValueError("At least one robomimic source must be provided.")
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            model_transforms=self.model_transforms(model_config),
+            robomimic_sources=self.robomimic_sources,
+            robomimic_low_dim_keys=self.robomimic_low_dim_keys,
+            robomimic_rgb_keys=self.robomimic_rgb_keys,
+            robomimic_action_key=self.robomimic_action_key,
+            robomimic_normalize_weights_by_ds_size=self.robomimic_normalize_weights_by_ds_size,
         )
 
 

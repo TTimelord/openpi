@@ -14,6 +14,7 @@ import torch
 import openpi.models.model as _model
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
+import openpi.training.robomimic_hdf5_dataset as robomimic_hdf5_dataset
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
@@ -131,6 +132,9 @@ def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
     """Create a dataset for training."""
+    if data_config.robomimic_sources:
+        return robomimic_hdf5_dataset.create_robomimic_dataset(data_config, action_horizon=action_horizon)
+
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
@@ -299,15 +303,24 @@ def create_torch_data_loader(
             execute in the main process.
         seed: The seed to use for shuffling the data.
     """
-    dataset = create_torch_dataset(data_config, action_horizon, model_config)
-    dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+    raw_dataset = create_torch_dataset(data_config, action_horizon, model_config)
+    sample_weights = getattr(raw_dataset, "sample_weights", None)
+    dataset = transform_dataset(raw_dataset, data_config, skip_norm_stats=skip_norm_stats)
 
-    # Use TorchDataLoader for both frameworks
-    # For PyTorch DDP, create DistributedSampler and divide batch size by world size
-    # For JAX, divide by process count
+    use_weighted_sampling = sample_weights is not None and shuffle
+    if use_weighted_sampling and len(sample_weights) != len(dataset):
+        raise ValueError(
+            f"sample_weights length ({len(sample_weights)}) must match dataset length ({len(dataset)})."
+        )
+
+    # Use TorchDataLoader for both frameworks.
     sampler = None
     if framework == "pytorch":
         if torch.distributed.is_initialized():
+            if use_weighted_sampling:
+                raise NotImplementedError(
+                    "Weighted robomimic sampling with distributed PyTorch is not supported in v1."
+                )
             sampler = torch.utils.data.distributed.DistributedSampler(
                 dataset,
                 num_replicas=torch.distributed.get_world_size(),
@@ -317,8 +330,20 @@ def create_torch_data_loader(
             )
             local_batch_size = batch_size // torch.distributed.get_world_size()
         else:
+            if use_weighted_sampling:
+                sampler = torch.utils.data.WeightedRandomSampler(
+                    sample_weights,
+                    num_samples=len(dataset),
+                    replacement=True,
+                )
             local_batch_size = batch_size
     else:
+        if use_weighted_sampling:
+            sampler = torch.utils.data.WeightedRandomSampler(
+                sample_weights,
+                num_samples=len(dataset),
+                replacement=True,
+            )
         local_batch_size = batch_size // jax.process_count()
 
     logging.info(f"local_batch_size: {local_batch_size}")
